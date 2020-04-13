@@ -4,9 +4,10 @@
 ##
 ## (C) 2020 Benumbed (Nick Whalen) <benumbed@projectneutron.com> -- All Rights Reserved
 ##
-import streams
 import strformat
 import unicode as uc
+
+import ./streamer
 
 type HclSyntaxError* = object of system.CatchableError
 
@@ -52,18 +53,17 @@ template newException(exceptn: typedesc, message: string, loc: SourceLocation,
 
 proc isDigit*(c: Rune): bool =
     ## Unicode compatible numeric check
-    return (int(c) <= int(Rune('9')) and int(c) >= int(Rune('0')))
+    (c <= '9') and (c >= '0')
 
 
-proc readIdentifier(stream: Stream, loc: var SourceLocation): HclToken =
+proc readIdentifier(stream: var Streamer, loc: var SourceLocation): HclToken =
     ## Reads an identifier from the stream and returns a new token
     var token: string
 
     const altRunes = @[Rune('-'), Rune('.')]
 
     while true:
-        let chr = uc.Rune(stream.readChar())
-        loc.column.inc
+        let chr = stream.readRune()
 
         if chr.isAlpha or chr.isDigit or chr in altRunes:
             token.add(chr)
@@ -73,16 +73,15 @@ proc readIdentifier(stream: Stream, loc: var SourceLocation): HclToken =
 
     return (HIdent, token)
 
-proc readNumber(stream: Stream, loc: var SourceLocation): HclToken =
+proc readNumber(stream: var Streamer, loc: var SourceLocation): HclToken =
     ## Reads a number from the stream
     var number: string
 
     # TODO: Numeric validation and type selection
     while true:
-        let chr = uc.Rune(stream.readChar())
-        loc.column.inc
+        let chr = stream.readRune()
 
-        if not(chr.isDigit or chr == Rune('x') or chr == Rune('.')):
+        if not(chr.isDigit or chr == 'x' or chr == '.'):
             break
         
         number.add(chr)
@@ -90,34 +89,30 @@ proc readNumber(stream: Stream, loc: var SourceLocation): HclToken =
     return (HNumber, number)
 
 
-proc readComment(stream: Stream, loc: var SourceLocation): HclToken =
+proc readComment(stream: var Streamer, loc: var SourceLocation): HclToken =
     ## Reads a comment from the stream
     var token: string
     # Note, we don't include the '#' in the token, because if we reproduce this, we'll add it during rendering
 
     while true:
-        let chr = uc.Rune(stream.readChar())
-        loc.column.inc
+        let chr = stream.readRune()
         if chr in EOL_CHARS or stream.atEnd:
-            loc.line.inc
-            loc.column = 0
+            stream.incLineCount
             break
         
         token.add(chr)
 
     return (HComment, token)
 
-proc readString(stream: Stream, loc: var SourceLocation): HclToken =
+proc readString(stream: var Streamer, loc: var SourceLocation): HclToken =
     ## Reads a quoted string from the stream
     var token: string
-    const endChr = Rune('"')
     
     # Remove the leading "
     stream.setPosition(stream.getPosition+1)
     while true:
-        let chr = uc.Rune(stream.readChar())
-        loc.column.inc
-        if chr == endChr:
+        let chr = stream.readRune()
+        if chr == '"':
             break
         
         token.add(chr)
@@ -125,27 +120,22 @@ proc readString(stream: Stream, loc: var SourceLocation): HclToken =
     return (HString, token)
 
 
-proc readHeredoc(stream: Stream, loc: var SourceLocation): HclToken =
+proc readHeredoc(stream: var Streamer, loc: var SourceLocation): HclToken =
     ## Reads a heredoc from the stream
     var heredoc: string
     var anchor: string
 
-    const indentChar = Rune('-')
+    const indentChar = '-'
 
-    var chr = Rune(stream.readChar())
-    loc.column.inc
-    if stream.readChar() != '<':
-        loc.column.inc
+    var chr = stream.readRune()
+    if stream.readRune() != '<':
         raise newException(HclSyntaxError, fmt"Expected second '<' in heredoc, got {chr}", loc)
-    loc.column.inc
 
     # Read the anchor
     while true:
-        chr = Rune(stream.readChar())
-        loc.column.inc
+        chr = stream.readRune()
         if chr in EOL_CHARS:
-            loc.line.inc
-            loc.column = 0
+            stream.incLineCount
             break
         anchor.add(chr)
 
@@ -154,41 +144,38 @@ proc readHeredoc(stream: Stream, loc: var SourceLocation): HclToken =
 
     while true:
         if stream.peekStr(anchor.len) == anchor:
-            loc.column.inc(anchor.len)
+            stream.incPosition(anchor.len)
             break
         
         if stream.atEnd():
             raise newException(HclSyntaxError, "Encountered unexpected EOF while processing heredoc, no terminating anchor", loc)
 
         # TODO: Allow for '-' in heredoc
-        heredoc.add(Rune(stream.readChar()))
+        heredoc.add(stream.readRune())
     
     return (HHeredoc, heredoc)
 
 
-proc lex*(stream: Stream): HclTokens =
+proc lex*(stream: var Streamer): HclTokens =
     ## Analyzes `stream` and returns the tokens within
     var srcLoc = SourceLocation()
     srcLoc.line = 1
 
     while not stream.atEnd():
-        # var chr = Rune(stream.peekChar())
-        var chr = Rune(stream.peekChar())
+        var chr = stream.peekRune()
 
         if chr.isWhiteSpace:
-            stream.setPosition(stream.getPosition()+1)
-            srcLoc.column.inc
+            stream.incPosition
 
             if chr in EOL_CHARS:
-                srcLoc.line.inc
-                srcLoc.column = 0
+                stream.incLineCount
             continue
 
         elif chr in COMMENT_CHARS:
             result.add(stream.readComment(srcLoc))
             continue
 
-        elif chr == Rune('"'):
+        elif chr == '"':
             result.add(stream.readString(srcLoc))
             continue
 
@@ -202,42 +189,43 @@ proc lex*(stream: Stream): HclTokens =
 
         # Operators
         
-        chr = uc.Rune(stream.readChar())
+        chr = stream.readRune()
         srcLoc.column.inc
 
-        if chr == Rune('<'):
+        if chr == '<':
             result.add(stream.readHeredoc(srcLoc))
             continue
 
-        elif chr == Rune('{'):
+        elif chr == '{':
             result.add((HLBrace, chr.toUtf8))
             continue
 
-        elif chr == Rune('}'):
+        elif chr == '}':
             result.add((HRBrace, chr.toUtf8))
             continue
 
-        elif chr == Rune('['):
+        elif chr == '[':
             result.add((HLBrack, chr.toUtf8))
             continue
 
-        elif chr == Rune(']'):
+        elif chr == ']':
             result.add((HRBrack, chr.toUtf8))
             continue
 
-        elif chr == Rune(','):
+        elif chr == ',':
             result.add((HComma, chr.toUtf8))
             continue
 
-        elif chr == Rune('='):
+        elif chr == '=':
             result.add((HAssign, chr.toUtf8))
             continue
 
-        elif chr == Rune('+'):
+        elif chr == '+':
             result.add((HAdd, chr.toUtf8))
             continue
 
-        elif chr == Rune('-'):
+        # TODO: Math
+        elif chr == '-':
             result.add((HSub, chr.toUtf8))
             continue
 
@@ -247,8 +235,7 @@ proc lex*(stream: Stream): HclTokens =
 
 when isMainModule:
     echo "HCL Lexer"
-    let fs = newFileStream("example.hcl")
-    let hcl = lex(fs)
-
+    var strm = newStreamerFromFile("example.hcl")
+    let hcl = lex(strm)
 
     echo hcl
