@@ -5,34 +5,12 @@
 ## (C) 2020 Benumbed (Nick Whalen) <benumbed@projectneutron.com> -- All Rights Reserved
 ##
 import strformat
-import unicode as uc
+import unicode
 
 import ./streamer
+import ./types
 
 type HclSyntaxError* = object of system.CatchableError
-
-type HclTokenTypes* = enum
-    HIllegal,
-    HEof,
-    HComment,
-
-    HIdent,
-    HNumber,
-    HFloat,
-    HBool,
-    HString,
-    HHeredoc,
-    
-    # Operators
-    HLBrack,
-    HLBrace,
-    HComma,
-    HPeriod,
-    HRBrack,
-    HRBrace,
-    HAssign,
-    HAdd,
-    HSub
 
 type HclToken* = tuple[kind: HclTokenTypes, token: string]
 type HclTokens* = seq[HclToken]
